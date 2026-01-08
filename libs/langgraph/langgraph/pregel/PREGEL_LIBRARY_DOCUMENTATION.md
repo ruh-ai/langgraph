@@ -1718,3 +1718,450 @@ def _whichmodule(obj: Any, name: str) -> str | None:
 
 ---
 
+## 5. Support & Utility Files
+
+### 5.1 `_checkpoint.py`
+
+**Location**: `langgraph/pregel/_checkpoint.py`
+
+**Purpose**: Provides utilities for creating, managing, and restoring checkpoints that enable state persistence and time-travel debugging.
+
+**Constants**:
+
+```python
+LATEST_VERSION = 4  # Current checkpoint format version
+```
+
+**Key Functions**:
+
+```python
+def empty_checkpoint() -> Checkpoint:
+    """Create an empty checkpoint for initialization.
+
+    Returns:
+        Checkpoint with default values:
+        - v: LATEST_VERSION
+        - id: UUID6-based unique ID
+        - ts: Current timestamp in ISO format
+        - channel_values: Empty dict
+        - channel_versions: Empty dict
+        - versions_seen: Empty dict
+    """
+
+def create_checkpoint(
+    checkpoint: Checkpoint,
+    channels: Mapping[str, BaseChannel] | None,
+    step: int,
+    *,
+    id: str | None = None,
+    updated_channels: set[str] | None = None,
+) -> Checkpoint:
+    """Create a new checkpoint from current state.
+
+    Args:
+        checkpoint: Previous checkpoint to base on
+        channels: Current channel instances
+        step: Current execution step
+        id: Optional specific checkpoint ID
+        updated_channels: Channels that were updated
+
+    Returns:
+        New Checkpoint with:
+        - Updated timestamp
+        - New ID based on step
+        - Current channel values
+        - Updated version information
+    """
+
+def channels_from_checkpoint(
+    specs: Mapping[str, BaseChannel | ManagedValueSpec],
+    checkpoint: Checkpoint,
+) -> tuple[Mapping[str, BaseChannel], ManagedValueMapping]:
+    """Restore channels from a checkpoint.
+
+    Args:
+        specs: Channel/managed value specifications
+        checkpoint: Checkpoint to restore from
+
+    Returns:
+        Tuple of (channels, managed_values)
+
+    Process:
+    1. Separate channel specs from managed value specs
+    2. Restore each channel from checkpoint values
+    3. Return both mappings
+    """
+
+def copy_checkpoint(checkpoint: Checkpoint) -> Checkpoint:
+    """Create a deep copy of a checkpoint.
+
+    Used when modifying checkpoint state to avoid
+    affecting the original checkpoint.
+    """
+```
+
+**Checkpoint Structure**:
+
+```python
+class Checkpoint(TypedDict):
+    """Checkpoint data structure for state persistence.
+
+    Attributes:
+        v: Version number for format compatibility
+        id: Unique identifier (UUID6-based)
+        ts: ISO timestamp of creation
+        channel_values: Serialized channel data
+        channel_versions: Version numbers per channel
+        versions_seen: Node -> channel versions mapping
+        updated_channels: Channels modified in this step
+    """
+    v: int
+    id: str
+    ts: str
+    channel_values: dict[str, Any]
+    channel_versions: dict[str, int]
+    versions_seen: dict[str, dict[str, int]]
+    updated_channels: list[str] | None
+```
+
+**Checkpoint Lifecycle**:
+
+```
+                    Execution Flow
+                         |
+    +--------------------+--------------------+
+    |                    |                    |
+    v                    v                    v
++-----------+      +-----------+        +-----------+
+| Checkpoint|      | Checkpoint|        | Checkpoint|
+| Step 0    | ---> | Step 1    | ---->  | Step N    |
+| id: abc   |      | id: def   |        | id: xyz   |
++-----------+      +-----------+        +-----------+
+    |                    |                    |
+    v                    v                    v
++-----------+      +-----------+        +-----------+
+| channel_  |      | channel_  |        | channel_  |
+| values    |      | values    |        | values    |
++-----------+      +-----------+        +-----------+
+```
+
+**Interactions**:
+- Used by `_loop.py` for state persistence
+- Consumed by `main.py` for state retrieval
+- Works with `BaseCheckpointSaver` implementations
+
+---
+
+### 5.2 `_retry.py`
+
+**Location**: `langgraph/pregel/_retry.py`
+
+**Purpose**: Implements retry logic for task execution with configurable backoff strategies, allowing graceful handling of transient failures.
+
+**Key Functions**:
+
+```python
+def run_with_retry(
+    task: PregelExecutableTask,
+    retry_policy: Sequence[RetryPolicy] | None,
+    configurable: dict[str, Any] | None = None,
+) -> None:
+    """Run a task with retry support (synchronous).
+
+    Args:
+        task: Task to execute
+        retry_policy: Sequence of retry policies to apply
+        configurable: Additional configuration
+
+    Behavior:
+    1. Execute task
+    2. On failure, find matching retry policy
+    3. Calculate backoff with optional jitter
+    4. Sleep and retry up to max_attempts
+    5. Raise if all retries exhausted
+    """
+
+async def arun_with_retry(
+    task: PregelExecutableTask,
+    retry_policy: Sequence[RetryPolicy] | None,
+    stream: bool = False,
+    match_cached_writes: Callable[[], Awaitable[Sequence[PregelExecutableTask]]] | None = None,
+    configurable: dict[str, Any] | None = None,
+) -> None:
+    """Run a task with retry support (asynchronous).
+
+    Additional parameters:
+        stream: Whether to use streaming execution
+        match_cached_writes: Callback to check cache hits
+    """
+
+def _should_retry_on(
+    retry_policy: RetryPolicy,
+    exc: Exception,
+) -> bool:
+    """Check if exception matches retry policy.
+
+    Handles three forms of retry_on:
+    - Single exception class
+    - Sequence of exception classes
+    - Callable predicate function
+    """
+```
+
+**RetryPolicy Structure**:
+
+```python
+@dataclass
+class RetryPolicy:
+    """Configuration for retry behavior.
+
+    Attributes:
+        max_attempts: Maximum number of attempts (including first)
+        initial_interval: Base wait time in seconds
+        max_interval: Maximum wait time in seconds
+        backoff_factor: Multiplier for each retry
+        jitter: Whether to add random jitter
+        retry_on: Exception types or predicate to retry on
+    """
+    max_attempts: int = 3
+    initial_interval: float = 0.5
+    max_interval: float = 60.0
+    backoff_factor: float = 2.0
+    jitter: bool = True
+    retry_on: type[Exception] | Sequence[type[Exception]] | Callable[[Exception], bool] = Exception
+```
+
+**Backoff Calculation**:
+
+```python
+# Exponential backoff with cap
+interval = initial_interval * (backoff_factor ** (attempt - 1))
+interval = min(max_interval, interval)
+
+# Add jitter if configured
+if jitter:
+    interval += random.uniform(0, 1)
+```
+
+**Retry Flow**:
+
+```
+                Execute Task
+                     |
+                     v
+              +------+------+
+              | Success?    |
+              +------+------+
+                |         |
+               Yes        No
+                |         |
+                v         v
+            Return   +--------+
+                     | Match  |
+                     | Policy?|
+                     +--------+
+                       |    |
+                      Yes   No
+                       |    |
+                       v    v
+                   +------+ Raise
+                   |Sleep |
+                   |Retry |
+                   +------+
+                       |
+                       v
+                   Increment
+                   Attempts
+                       |
+                       v
+              +--------+--------+
+              | < max_attempts? |
+              +--------+--------+
+                  |          |
+                 Yes         No
+                  |          |
+                  v          v
+             Execute      Raise
+               Task
+```
+
+**Interactions**:
+- Called by `_runner.py` for task execution
+- Uses `RetryPolicy` from types module
+- Logs retry attempts via `_log.py`
+
+---
+
+### 5.3 `_utils.py`
+
+**Location**: `langgraph/pregel/_utils.py`
+
+**Purpose**: Provides miscellaneous utility functions for version management, subgraph discovery, and AST-based code analysis.
+
+**Key Functions**:
+
+```python
+def get_new_channel_versions(
+    previous_versions: ChannelVersions,
+    current_versions: ChannelVersions,
+) -> ChannelVersions:
+    """Get subset of current versions that are newer.
+
+    Args:
+        previous_versions: Versions from previous checkpoint
+        current_versions: Current channel versions
+
+    Returns:
+        Dict of channels that have been updated
+
+    Used to determine which channels changed
+    for checkpoint metadata.
+    """
+
+def find_subgraph_pregel(
+    candidate: Runnable,
+) -> PregelProtocol | None:
+    """Find a Pregel subgraph within a runnable.
+
+    Recursively searches through:
+    - RunnableSequence chains
+    - RunnableLambda dependencies
+    - RunnableCallable closures
+
+    Returns:
+        PregelProtocol instance or None
+
+    Used for subgraph discovery during compilation.
+    """
+
+def get_function_nonlocals(
+    func: Callable,
+) -> list[Any]:
+    """Get nonlocal variables accessed by a function.
+
+    Uses AST analysis to find closure variables
+    that a function references from outer scopes.
+
+    Returns:
+        List of nonlocal values
+    """
+
+def is_xxh3_128_hexdigest(
+    value: str,
+) -> bool:
+    """Check if string is a valid XXH3-128 hex digest.
+
+    Used for validating cache keys and checksums.
+
+    Returns:
+        True if 32-character hex string
+    """
+```
+
+**AST Visitors**:
+
+```python
+class FunctionNonLocals(ast.NodeVisitor):
+    """AST visitor to find function nonlocals.
+
+    Visits:
+    - FunctionDef
+    - AsyncFunctionDef
+    - Lambda
+
+    Collects names that are loaded but not stored
+    (i.e., come from outer scope).
+    """
+    nonlocals: set[str]
+
+class NonLocals(ast.NodeVisitor):
+    """AST visitor for name analysis.
+
+    Tracks:
+    - loads: Names that are read
+    - stores: Names that are written
+
+    Nonlocals = loads - stores
+    """
+    loads: set[str]
+    stores: set[str]
+
+    def visit_Name(self, node: ast.Name) -> Any:
+        """Track name loads and stores."""
+
+    def visit_Attribute(self, node: ast.Attribute) -> Any:
+        """Track attribute access patterns."""
+```
+
+**Subgraph Discovery Flow**:
+
+```
+                Runnable
+                    |
+         +----------+----------+
+         |          |          |
+         v          v          v
+    RunnableSeq  Lambda   RunnableCallable
+         |          |          |
+         v          v          v
+    [steps]     [deps]      [func/afunc]
+         |          |          |
+         +--> check each for PregelProtocol
+```
+
+**Interactions**:
+- Used by `main.py` for subgraph discovery
+- Used by `_checkpoint.py` for version comparison
+- Used by `_draw.py` for graph analysis
+
+---
+
+### 5.4 `_log.py`
+
+**Location**: `langgraph/pregel/_log.py`
+
+**Purpose**: Provides a centralized logger for the Pregel library.
+
+**Content**:
+
+```python
+import logging
+
+logger = logging.getLogger("langgraph")
+```
+
+**Usage**:
+
+```python
+from langgraph.pregel._log import logger
+
+# Log retry attempts
+logger.info(
+    f"Retrying task {task.name} after {sleep_time:.2f}s "
+    f"(attempt {attempts}) after {exc.__class__.__name__} {exc}",
+    exc_info=exc,
+)
+
+# Log warnings
+logger.warning("No events received from remote graph")
+
+# Log debug information
+logger.debug(f"Preparing {len(tasks)} tasks for step {step}")
+```
+
+**Log Levels Used**:
+
+| Level | Usage |
+|-------|-------|
+| `DEBUG` | Detailed execution tracing |
+| `INFO` | Retry attempts, state changes |
+| `WARNING` | Unexpected but recoverable situations |
+| `ERROR` | Errors that prevent normal operation |
+
+**Interactions**:
+- Used throughout the pregel package
+- Integrates with Python's logging infrastructure
+- Can be configured by application using LangGraph
+
+---
+
