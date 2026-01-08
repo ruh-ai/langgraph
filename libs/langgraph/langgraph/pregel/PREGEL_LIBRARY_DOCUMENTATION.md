@@ -1017,3 +1017,704 @@ AI Response Generation          Message Streaming          Client
 
 ---
 
+## 4. Execution Engine Files
+
+### 4.1 `_algo.py`
+
+**Location**: `langgraph/pregel/_algo.py`
+
+**Purpose**: Contains the core algorithms for the Pregel execution model, including task preparation, write application, and version management.
+
+**Key Data Structures**:
+
+```python
+@dataclass
+class PregelTaskWrites:
+    """Container for task write operations.
+
+    Attributes:
+        path: Path in the execution tree
+        name: Task/node name
+        writes: List of (channel, value) pairs
+        triggers: Channels that triggered this task
+    """
+    path: tuple[str | int, ...]
+    name: str
+    writes: list[tuple[str, Any]]
+    triggers: list[str]
+```
+
+**Key Functions**:
+
+```python
+def prepare_next_tasks(
+    checkpoint: Checkpoint,
+    pending_writes: list[tuple[str, str, Any]],
+    nodes: dict[str, PregelNode],
+    channels: Mapping[str, BaseChannel],
+    managed: ManagedValueMapping,
+    config: RunnableConfig,
+    step: int,
+    stop: int,
+    *,
+    for_execution: bool,
+    store: BaseStore | None,
+    checkpointer: BaseCheckpointSaver | None,
+    manager: ParentRunManager | None,
+    trigger_to_nodes: Mapping[str, Sequence[str]] | None = None,
+    updated_channels: set[str] | None = None,
+) -> dict[str, PregelExecutableTask]:
+    """Prepare tasks for the next execution step.
+
+    Algorithm:
+    1. Identify channels that were updated
+    2. Find nodes triggered by those channels
+    3. Prepare input for each triggered node
+    4. Create PregelExecutableTask for each
+
+    Args:
+        checkpoint: Current checkpoint state
+        pending_writes: Writes from previous step
+        nodes: Available graph nodes
+        channels: Channel instances
+        managed: Managed value mappings
+        config: Execution configuration
+        step: Current step number
+        stop: Maximum step number
+        for_execution: Whether tasks are for execution vs introspection
+        store: Optional key-value store
+        checkpointer: Optional checkpointer
+        manager: Optional run manager for tracing
+
+    Returns:
+        Dict mapping task IDs to executable tasks
+    """
+
+def apply_writes(
+    checkpoint: Checkpoint,
+    channels: Mapping[str, BaseChannel],
+    tasks: Iterable[PregelTaskWrites],
+    get_next_version: Callable[[int | None, BaseChannel], int] | None,
+    trigger_to_nodes: Mapping[str, Sequence[str]],
+) -> set[str]:
+    """Apply task writes to channels.
+
+    Algorithm:
+    1. Group writes by channel
+    2. Apply writes to each channel
+    3. Update channel versions
+    4. Track which channels were updated
+
+    Args:
+        checkpoint: Checkpoint to update
+        channels: Channel instances
+        tasks: Tasks with writes to apply
+        get_next_version: Version increment function
+        trigger_to_nodes: Mapping of triggers to node names
+
+    Returns:
+        Set of channel names that were updated
+    """
+
+def increment(
+    current_version: int | None,
+    channel: BaseChannel,
+) -> int:
+    """Default version increment function.
+
+    Simple integer increment for channel versioning.
+    """
+    return (current_version or 0) + 1
+
+def should_interrupt(
+    checkpoint: Checkpoint,
+    interrupt_nodes: Sequence[str] | All,
+    tasks: Iterable[PregelExecutableTask],
+) -> list[PregelExecutableTask]:
+    """Determine which tasks should trigger an interrupt.
+
+    Used for human-in-the-loop patterns where execution
+    pauses at specified nodes.
+    """
+```
+
+**Task Preparation Flow**:
+
+```
+Channel Updates          prepare_next_tasks()         Executable Tasks
++---------------+       +-------------------+        +----------------+
+| messages: v2  | ----> | 1. Find triggers  | -----> | Task: agent    |
+| context: v3   |       | 2. Check versions |        |   input: {...} |
++---------------+       | 3. Build inputs   |        |   config: {...}|
+                        | 4. Create tasks   |        +----------------+
+                        +-------------------+
+```
+
+**Version Tracking**:
+
+The algorithm uses version tracking to ensure nodes only execute when their triggers have new data:
+
+```python
+# checkpoint.versions_seen tracks what each node has seen
+versions_seen = {
+    "agent": {"messages": 1, "context": 2},
+    "tool": {"messages": 1}
+}
+
+# checkpoint.channel_versions tracks current versions
+channel_versions = {
+    "messages": 2,  # Updated!
+    "context": 2
+}
+
+# Node "agent" triggers because messages version > seen version
+# Node "tool" also triggers because messages version > seen version
+```
+
+**Interactions**:
+- Called by `_loop.py` to prepare each step's tasks
+- Uses `_io.py` for channel reading
+- Provides tasks to `_runner.py` for execution
+
+---
+
+### 4.2 `_loop.py`
+
+**Location**: `langgraph/pregel/_loop.py`
+
+**Purpose**: Implements the main execution loop for Pregel graphs, coordinating task scheduling, execution, and state management.
+
+**Key Classes**:
+
+```python
+class PregelLoop:
+    """Synchronous execution loop for Pregel graphs.
+
+    Manages the iterative execution of graph nodes,
+    checkpointing, and output streaming.
+    """
+
+    def __init__(
+        self,
+        input: Any,
+        *,
+        config: RunnableConfig,
+        checkpointer: BaseCheckpointSaver | None,
+        nodes: dict[str, PregelNode],
+        channels: dict[str, BaseChannel],
+        managed: ManagedValueMapping,
+        specs: dict[str, BaseChannel | ManagedValueSpec],
+        output_channels: str | Sequence[str],
+        stream_channels: str | Sequence[str],
+        interrupt_before: Sequence[str] | All,
+        interrupt_after: Sequence[str] | All,
+        store: BaseStore | None,
+        trigger_to_nodes: Mapping[str, Sequence[str]],
+    ):
+        """Initialize the execution loop."""
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        """Iterate through execution, yielding outputs."""
+
+    def tick(self) -> bool:
+        """Execute one step of the graph.
+
+        Returns:
+            True if more steps should execute, False if done
+
+        Process:
+        1. Check for pending interrupts
+        2. Prepare next tasks
+        3. Execute tasks
+        4. Apply writes
+        5. Create checkpoint
+        6. Stream outputs
+        """
+
+
+class AsyncPregelLoop:
+    """Asynchronous execution loop for Pregel graphs.
+
+    Async variant of PregelLoop for use with asyncio.
+    """
+
+    async def __aiter__(self) -> AsyncIterator[dict[str, Any]]:
+        """Async iterate through execution."""
+
+    async def atick(self) -> bool:
+        """Execute one async step of the graph."""
+```
+
+**Loop Lifecycle**:
+
+```
+                           PregelLoop
+                               |
+           +-------------------+-------------------+
+           |                   |                   |
+           v                   v                   v
+    +------------+      +------------+      +------------+
+    |  Step 0    |      |  Step 1    |      |  Step N    |
+    | - Prepare  |      | - Prepare  |      | - Prepare  |
+    | - Execute  | ---> | - Execute  | ---> | - Execute  |
+    | - Write    |      | - Write    |      | - Write    |
+    | - Checkpoint|     | - Checkpoint|     | - Checkpoint|
+    +------------+      +------------+      +------------+
+           |                   |                   |
+           v                   v                   v
+    +------------+      +------------+      +------------+
+    | Stream     |      | Stream     |      | Stream     |
+    | outputs    |      | outputs    |      | outputs    |
+    +------------+      +------------+      +------------+
+```
+
+**Step Execution Details**:
+
+```python
+def tick(self) -> bool:
+    # 1. Check for interrupts before nodes
+    if self.step > 0 and should_interrupt(
+        self.checkpoint,
+        self.interrupt_before,
+        self.tasks.values()
+    ):
+        return False
+
+    # 2. Execute all current tasks
+    with BackgroundExecutor(self.config) as submit:
+        for task in self.tasks.values():
+            submit(run_with_retry, task, self.retry_policy)
+
+    # 3. Apply writes to channels
+    updated = apply_writes(
+        self.checkpoint,
+        self.channels,
+        self.tasks.values(),
+        self.get_next_version,
+        self.trigger_to_nodes,
+    )
+
+    # 4. Check for interrupts after nodes
+    if should_interrupt(
+        self.checkpoint,
+        self.interrupt_after,
+        self.tasks.values()
+    ):
+        return False
+
+    # 5. Create checkpoint if checkpointer configured
+    if self.checkpointer:
+        self.checkpoint = create_checkpoint(...)
+        self.checkpointer.put(...)
+
+    # 6. Prepare next step's tasks
+    self.tasks = prepare_next_tasks(...)
+
+    # 7. Continue if there are more tasks
+    return bool(self.tasks)
+```
+
+**Interactions**:
+- Created and run by `main.py`
+- Uses `_algo.py` for task preparation
+- Uses `_runner.py` for task execution
+- Uses `_checkpoint.py` for state persistence
+
+---
+
+### 4.3 `_runner.py`
+
+**Location**: `langgraph/pregel/_runner.py`
+
+**Purpose**: Handles the actual execution of individual tasks, including parallel execution management and result collection.
+
+**Key Functions**:
+
+```python
+def run_task(
+    task: PregelExecutableTask,
+    *,
+    retry_policy: Sequence[RetryPolicy] | None,
+    config: RunnableConfig,
+) -> None:
+    """Execute a single task synchronously.
+
+    Args:
+        task: The task to execute
+        retry_policy: Optional retry configuration
+        config: Execution configuration
+
+    Process:
+    1. Prepare task configuration
+    2. Invoke the task's runnable
+    3. Collect outputs via writers
+    4. Handle any errors or interrupts
+    """
+
+async def arun_task(
+    task: PregelExecutableTask,
+    *,
+    retry_policy: Sequence[RetryPolicy] | None,
+    config: RunnableConfig,
+) -> None:
+    """Execute a single task asynchronously."""
+
+def execute_tasks(
+    tasks: Iterable[PregelExecutableTask],
+    *,
+    config: RunnableConfig,
+    retry_policy: Sequence[RetryPolicy] | None,
+) -> list[PregelTaskWrites]:
+    """Execute multiple tasks, potentially in parallel.
+
+    Uses a thread pool executor for parallel execution
+    of synchronous tasks.
+
+    Returns:
+        List of task writes from all executed tasks
+    """
+
+async def aexecute_tasks(
+    tasks: Iterable[PregelExecutableTask],
+    *,
+    config: RunnableConfig,
+    retry_policy: Sequence[RetryPolicy] | None,
+) -> list[PregelTaskWrites]:
+    """Execute multiple tasks asynchronously in parallel.
+
+    Uses asyncio.gather for concurrent execution
+    of async tasks.
+    """
+```
+
+**Task Execution Flow**:
+
+```
+PregelExecutableTask               Execution                  Results
++-------------------+          +---------------+         +-------------+
+| id: "abc123"      |          |               |         | writes:     |
+| name: "agent"     | -------> | task.proc     | ------> |  [(msg, v)] |
+| input: {...}      |          | .invoke(...)  |         | triggers:   |
+| proc: Runnable    |          |               |         |  [msg]      |
+| config: {...}     |          +---------------+         +-------------+
++-------------------+
+```
+
+**Parallel Execution Strategy**:
+
+```python
+# Sync tasks: Use ThreadPoolExecutor
+with ThreadPoolExecutor(max_workers=4) as executor:
+    futures = [
+        executor.submit(run_task, task, retry_policy=policy)
+        for task in tasks
+    ]
+    results = [f.result() for f in futures]
+
+# Async tasks: Use asyncio.gather
+results = await asyncio.gather(*[
+    arun_task(task, retry_policy=policy)
+    for task in tasks
+])
+```
+
+**Interactions**:
+- Called by `_loop.py` during each tick
+- Uses `_retry.py` for retry logic
+- Uses `_executor.py` for background execution
+- Task outputs processed by `_algo.py`
+
+---
+
+### 4.4 `_executor.py`
+
+**Location**: `langgraph/pregel/_executor.py`
+
+**Purpose**: Provides background execution capabilities for running tasks in separate threads or as async tasks, with proper lifecycle management.
+
+**Key Classes**:
+
+```python
+class BackgroundExecutor(AbstractContextManager):
+    """Context manager for running sync tasks in the background.
+
+    Uses a thread pool executor to delegate tasks to separate threads.
+
+    Lifecycle:
+    - On enter: Initialize executor
+    - During: Submit tasks for background execution
+    - On exit: Wait for all tasks, re-raise any errors
+    """
+
+    def __init__(self, config: RunnableConfig) -> None:
+        """Initialize with configuration.
+
+        Args:
+            config: Configuration with executor settings
+        """
+        self.stack = ExitStack()
+        self.executor = self.stack.enter_context(
+            get_executor_for_config(config)
+        )
+        self.tasks: dict[Future, tuple[bool, bool]] = {}
+
+    def submit(
+        self,
+        fn: Callable[P, T],
+        *args: P.args,
+        __name__: str | None = None,
+        __cancel_on_exit__: bool = False,
+        __reraise_on_exit__: bool = True,
+        __next_tick__: bool = False,
+        **kwargs: P.kwargs,
+    ) -> Future[T]:
+        """Submit a task for background execution.
+
+        Args:
+            fn: Function to execute
+            *args: Positional arguments
+            __cancel_on_exit__: Cancel if not started on exit
+            __reraise_on_exit__: Re-raise exceptions on exit
+            __next_tick__: Yield control before executing
+
+        Returns:
+            Future representing the task
+        """
+
+    def __exit__(self, exc_type, exc_value, traceback) -> bool | None:
+        """Clean up on exit.
+
+        Process:
+        1. Cancel tasks marked for cancellation
+        2. Wait for all tasks to complete
+        3. Shutdown executor
+        4. Re-raise first exception if any
+        """
+
+
+class AsyncBackgroundExecutor(AbstractAsyncContextManager):
+    """Async context manager for background async tasks.
+
+    Uses asyncio for concurrent task execution.
+    """
+
+    def __init__(self, config: RunnableConfig) -> None:
+        """Initialize with configuration."""
+        self.tasks: dict[asyncio.Future, tuple[bool, bool]] = {}
+        self.loop = asyncio.get_running_loop()
+        if max_concurrency := config.get("max_concurrency"):
+            self.semaphore = asyncio.Semaphore(max_concurrency)
+
+    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
+        """Async cleanup on exit."""
+```
+
+**Submit Protocol**:
+
+```python
+class Submit(Protocol[P, T]):
+    """Protocol for task submission.
+
+    Defines the interface for submitting background tasks
+    with lifecycle control flags.
+    """
+
+    def __call__(
+        self,
+        fn: Callable[P, T],
+        *args: P.args,
+        __name__: str | None = None,
+        __cancel_on_exit__: bool = False,
+        __reraise_on_exit__: bool = True,
+        __next_tick__: bool = False,
+        **kwargs: P.kwargs,
+    ) -> Future[T]: ...
+```
+
+**Usage Pattern**:
+
+```python
+# Synchronous usage
+with BackgroundExecutor(config) as submit:
+    future1 = submit(task1.run, input1)
+    future2 = submit(task2.run, input2, __cancel_on_exit__=True)
+    # Tasks execute concurrently
+# On exit: waits for completion, re-raises errors
+
+# Asynchronous usage
+async with AsyncBackgroundExecutor(config) as submit:
+    future1 = submit(async_task1.run, input1)
+    future2 = submit(async_task2.run, input2)
+    # Tasks execute concurrently
+# On exit: awaits completion, re-raises errors
+```
+
+**Helper Functions**:
+
+```python
+async def gated(
+    semaphore: asyncio.Semaphore,
+    coro: Coroutine[None, None, T],
+) -> T:
+    """Gate a coroutine with a semaphore.
+
+    Used to limit concurrent async executions.
+    """
+    async with semaphore:
+        return await coro
+
+def next_tick(
+    fn: Callable[P, T],
+    *args: P.args,
+    **kwargs: P.kwargs,
+) -> T:
+    """Yield control before executing.
+
+    Allows other threads to run before this task starts.
+    """
+    time.sleep(0)
+    return fn(*args, **kwargs)
+```
+
+**Interactions**:
+- Used by `_loop.py` for parallel task execution
+- Consumed by `_runner.py` for task submission
+- Coordinates with Python's threading/asyncio modules
+
+---
+
+### 4.5 `_call.py`
+
+**Location**: `langgraph/pregel/_call.py`
+
+**Purpose**: Provides utilities for calling functions as tasks within the Pregel execution context, including creating runnables from user functions and handling async/sync interoperability.
+
+**Key Functions**:
+
+```python
+def get_runnable_for_entrypoint(
+    func: Callable[..., Any],
+) -> Runnable:
+    """Convert a function to a Runnable for graph entry.
+
+    Args:
+        func: User-provided function
+
+    Returns:
+        Runnable that can be used as graph input processor
+
+    Handles:
+    - Async functions: wraps directly
+    - Sync functions: wraps with executor for async compat
+    """
+
+def get_runnable_for_task(
+    func: Callable[..., Any],
+) -> Runnable:
+    """Convert a function to a Runnable for task execution.
+
+    Args:
+        func: User-provided function
+
+    Returns:
+        RunnableSeq with the function and ChannelWrite
+
+    Creates a runnable sequence that:
+    1. Executes the user function
+    2. Writes the return value to RETURN channel
+    """
+
+def identifier(
+    obj: Any,
+    name: str | None = None,
+) -> str | None:
+    """Get the module and name identifier for an object.
+
+    Used for caching and debugging purposes.
+
+    Returns:
+        String like "mymodule.my_function" or None
+    """
+
+def call(
+    func: Callable[P, Awaitable[T]] | Callable[P, T],
+    *args: Any,
+    retry_policy: Sequence[RetryPolicy] | None = None,
+    cache_policy: CachePolicy | None = None,
+    **kwargs: Any,
+) -> SyncAsyncFuture[T]:
+    """Call a function within the Pregel execution context.
+
+    This is the primary way to invoke sub-tasks from within
+    a node's execution.
+
+    Args:
+        func: Function to call
+        *args: Positional arguments
+        retry_policy: Optional retry configuration
+        cache_policy: Optional caching configuration
+        **kwargs: Keyword arguments
+
+    Returns:
+        Future that resolves to the function's result
+    """
+```
+
+**SyncAsyncFuture**:
+
+```python
+class SyncAsyncFuture(Generic[T], Future[T]):
+    """A Future that can be awaited in both sync and async contexts.
+
+    Enables seamless interoperability between sync and async code
+    within Pregel execution.
+    """
+
+    def __await__(self) -> Generator[T, None, T]:
+        """Allow awaiting in async context."""
+        yield cast(T, ...)
+```
+
+**Function Caching**:
+
+```python
+# Cache for converted runnables
+CACHE: dict[tuple[Callable[..., Any], bool], Runnable] = {}
+
+# Key is (function, is_task)
+# - (func, False) -> entrypoint runnable
+# - (func, True) -> task runnable with ChannelWrite
+```
+
+**Module Resolution**:
+
+```python
+def _lookup_module_and_qualname(
+    obj: Any,
+    name: str | None = None,
+) -> tuple[ModuleType, str] | None:
+    """Look up an object's module and qualified name.
+
+    Used to determine if a function can be cached/pickled
+    and for debugging information.
+
+    Returns:
+        (module, qualname) tuple or None if not resolvable
+    """
+
+def _whichmodule(obj: Any, name: str) -> str | None:
+    """Find the module an object belongs to.
+
+    More robust than pickle.whichmodule, handles edge cases
+    like dynamically created modules.
+    """
+```
+
+**Interactions**:
+- Used by `main.py` for creating node runnables
+- Provides `call()` for sub-task invocation
+- Integrates with `_retry.py` for retry policies
+- Connects with caching system for performance
+
+---
+
