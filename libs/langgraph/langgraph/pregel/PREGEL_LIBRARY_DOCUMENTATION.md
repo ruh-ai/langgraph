@@ -592,3 +592,428 @@ ValueError("Interrupt before node 'review' not found in graph")
 
 ---
 
+## 3. I/O & Communication Files
+
+### 3.1 `_io.py`
+
+**Location**: `langgraph/pregel/_io.py`
+
+**Purpose**: Handles input/output operations for the Pregel execution, including mapping inputs to channels, reading outputs from channels, and managing single/multiple value scenarios.
+
+**Key Functions**:
+
+```python
+def map_input(
+    input_channels: str | Sequence[str],
+    chunk: Any,
+) -> Iterator[tuple[str, Any]]:
+    """Map input data to channel writes.
+
+    Args:
+        input_channels: Target channel(s) for input
+        chunk: Input data to map
+
+    Yields:
+        (channel_name, value) tuples for each channel
+
+    Behavior:
+    - Single channel: wraps value as (channel, value)
+    - Multiple channels: expects dict, yields per channel
+    - Command input: extracts and yields updates
+    """
+
+def map_output_values(
+    output_channels: str | Sequence[str],
+    pending_writes: list[tuple[str, Any]],
+    channels: Mapping[str, BaseChannel],
+) -> Iterator[Any]:
+    """Extract output values from channels after execution.
+
+    Args:
+        output_channels: Channel(s) to read from
+        pending_writes: List of pending write operations
+        channels: Available channel instances
+
+    Yields:
+        Output values from specified channels
+    """
+
+def map_output_updates(
+    output_channels: str | Sequence[str],
+    tasks: Iterable[PregelExecutableTask],
+    cached_tasks: Iterable[PregelExecutableTask] | None = None,
+) -> Iterator[dict[str, Any]]:
+    """Map task writes to update dictionaries.
+
+    Returns incremental updates from task execution,
+    useful for streaming intermediate results.
+    """
+
+def read_channel(
+    channels: Mapping[str, BaseChannel],
+    chan: str,
+    *,
+    catch: bool = True,
+    return_exception: bool = False,
+) -> Any | None:
+    """Read a single value from a channel.
+
+    Args:
+        channels: Available channel instances
+        chan: Channel name to read
+        catch: If True, catch EmptyChannelError
+        return_exception: If True, return exception instead of raising
+
+    Returns:
+        Channel value or None if empty (when catch=True)
+    """
+
+def read_channels(
+    channels: Mapping[str, BaseChannel],
+    select: str | Sequence[str],
+) -> dict[str, Any] | Any:
+    """Read values from multiple channels.
+
+    Args:
+        channels: Available channel instances
+        select: Channel name(s) to read
+
+    Returns:
+        - Single channel: direct value
+        - Multiple channels: dict of {channel: value}
+    """
+```
+
+**Input Handling**:
+
+```
+User Input                map_input()               Channel Writes
++---------+              +-----------+             +-------------+
+| "hello" | --single---> | ("msg",   | --------->  | msg: "hello"|
++---------+              |  "hello") |             +-------------+
+                         +-----------+
+
++-----------+            +-----------+             +-------------+
+| {"a": 1,  | --multi--> | ("a", 1)  | --------->  | a: 1        |
+|  "b": 2}  |            | ("b", 2)  |             | b: 2        |
++-----------+            +-----------+             +-------------+
+```
+
+**Interactions**:
+- Called by `_loop.py` to process graph input
+- Used by `_algo.py` to read channel values
+- Provides data to `main.py` for output generation
+
+---
+
+### 3.2 `_read.py`
+
+**Location**: `langgraph/pregel/_read.py`
+
+**Purpose**: Defines the `PregelNode` class and channel reading mechanisms that allow nodes to access channel data during execution.
+
+**Key Class**: `PregelNode`
+
+```python
+@dataclass
+class PregelNode:
+    """A node in the Pregel graph with its configuration.
+
+    This class represents a single computational unit in the graph,
+    including its input/output configuration and execution behavior.
+    """
+
+    # Channel configuration
+    channels: Mapping[None, str] | Mapping[str, str]
+    triggers: Sequence[str]
+
+    # Execution configuration
+    mapper: Callable[[Any], Any] | None = None
+    writers: Sequence[Runnable] = field(default_factory=list)
+
+    # The actual computation
+    bound: Runnable = field(default=None)
+
+    # Metadata and policies
+    metadata: Mapping[str, Any] | None = None
+    retry_policy: Sequence[RetryPolicy] | None = None
+    defer: bool = False
+    tags: Sequence[str] | None = None
+
+    # Subgraph support
+    subgraphs: list[PregelProtocol] = field(default_factory=list)
+
+    def copy(self, update: dict[str, Any]) -> PregelNode:
+        """Create a copy with updated attributes."""
+
+    def get_writers(self) -> list[Runnable]:
+        """Get all writer runnables for this node."""
+
+def ChannelRead:
+    """Helper for reading from channels within node execution.
+
+    Provides a way for nodes to access channel data:
+    - Direct channel access via read callback
+    - Mapped input transformation
+    - Multi-channel aggregation
+    """
+```
+
+**Channel Mapping**:
+
+```python
+# Single channel (value passed directly)
+channels = {None: "messages"}
+# Result: node receives messages channel value directly
+
+# Multiple channels (dict passed)
+channels = {"msgs": "messages", "ctx": "context"}
+# Result: node receives {"msgs": <messages>, "ctx": <context>}
+
+# With mapper
+mapper = lambda x: x[-1]  # Get last message
+# Result: node receives last message from channel
+```
+
+**Trigger Mechanism**:
+
+```python
+# Node triggers when any trigger channel updates
+triggers = ["messages", "user_input"]
+
+# During execution:
+# 1. Channel "messages" updated
+# 2. System checks: "messages" in triggers? Yes
+# 3. Node scheduled for execution
+```
+
+**Interactions**:
+- Created by `StateGraph.compile()` for each node
+- Used by `_algo.py` to prepare node inputs
+- Writers connect to `_write.py` for output handling
+
+---
+
+### 3.3 `_write.py`
+
+**Location**: `langgraph/pregel/_write.py`
+
+**Purpose**: Handles channel write operations, including the `ChannelWrite` class that manages how node outputs are written to channels.
+
+**Key Classes**:
+
+```python
+@dataclass
+class ChannelWriteEntry:
+    """Single channel write specification.
+
+    Attributes:
+        channel: Target channel name
+        value: Value to write (can be SKIP_WRITE sentinel)
+        skip_none: Whether to skip None values
+        mapper: Optional transformation before writing
+    """
+    channel: str
+    value: Any = PASSTHROUGH
+    skip_none: bool = False
+    mapper: Callable[[Any], Any] | None = None
+
+
+class ChannelWrite(RunnableCallable):
+    """Runnable that writes to channels.
+
+    This class is the primary mechanism for nodes to output
+    data to channels for consumption by other nodes.
+    """
+
+    writes: list[ChannelWriteEntry | Send]
+    require_at_least_one_of: Sequence[str] | None
+
+    def __init__(
+        self,
+        writes: Sequence[ChannelWriteEntry | Send],
+        *,
+        tags: Sequence[str] | None = None,
+        require_at_least_one_of: Sequence[str] | None = None,
+    ):
+        """Initialize channel writer.
+
+        Args:
+            writes: List of write specifications
+            tags: Optional tags for tracing
+            require_at_least_one_of: Channels that must have at least one write
+        """
+
+    def invoke(
+        self,
+        input: Any,
+        config: RunnableConfig,
+    ) -> None:
+        """Execute writes based on input and configuration.
+
+        Process:
+        1. Iterate through write specifications
+        2. Apply any mappers to transform values
+        3. Filter out SKIP_WRITE and None (if skip_none)
+        4. Write values to channels via send callback
+        """
+
+    @staticmethod
+    def register_writer(writer: ChannelWrite) -> Callable:
+        """Register a writer for static analysis.
+
+        Used by graph visualization to determine edges
+        without executing the graph.
+        """
+
+    @staticmethod
+    def get_static_writes(writer: ChannelWrite) -> list[tuple[str, Any, str | None]]:
+        """Get statically declared writes for graph analysis."""
+```
+
+**Write Flow**:
+
+```
+Node Output              ChannelWrite              Channels
++-----------+           +-------------+           +---------+
+| {"msg":   | --------> | Process     | --------> | msg:    |
+|  "hello"} |           | entries:    |           | "hello" |
++-----------+           | - channel   |           +---------+
+                        | - mapper    |
+                        | - skip_none |
+                        +-------------+
+```
+
+**Special Values**:
+
+```python
+PASSTHROUGH  # Pass node output directly to channel
+SKIP_WRITE   # Skip this write operation
+Send(node, value)  # Send value to specific node (dynamic routing)
+```
+
+**Send Class for Dynamic Routing**:
+
+```python
+class Send:
+    """Represents a message to send to a specific node.
+
+    Used for dynamic routing where the target node
+    is determined at runtime.
+    """
+    node: str   # Target node name
+    arg: Any    # Value to send
+
+    def __hash__(self) -> int:
+        """Make Send hashable for deduplication."""
+```
+
+**Interactions**:
+- Attached to `PregelNode` as writers
+- Invoked by `_runner.py` after node execution
+- Writes processed by `_algo.py` to update channels
+
+---
+
+### 3.4 `_messages.py`
+
+**Location**: `langgraph/pregel/_messages.py`
+
+**Purpose**: Provides utilities for handling LangChain message streams during graph execution, enabling real-time streaming of AI-generated content.
+
+**Key Functions**:
+
+```python
+def apply_messages_shim(
+    messages: Sequence[AnyMessage] | tuple[AnyMessage, ...],
+    *,
+    tool_calls_key: str = "tool_calls",
+) -> tuple[AnyMessage, ...]:
+    """Apply message compatibility transformations.
+
+    Handles differences between message formats across
+    LangChain versions and providers.
+
+    Args:
+        messages: Input messages to transform
+        tool_calls_key: Key used for tool call data
+
+    Returns:
+        Normalized message tuple
+    """
+
+def messages_to_stream_chunks(
+    messages: Sequence[AnyMessage] | tuple[AnyMessage, ...],
+) -> Iterator[tuple[AnyMessage, MessageChunkMetadata]]:
+    """Convert complete messages to streaming chunks.
+
+    Transforms full messages into chunk format suitable
+    for streaming output, maintaining message metadata.
+
+    Yields:
+        (message_chunk, metadata) tuples
+    """
+
+def stream_messages(
+    messages: Sequence[AnyMessage] | tuple[AnyMessage, ...],
+    stream: StreamProtocol,
+    ns: tuple[str, ...],
+) -> None:
+    """Stream messages through the stream protocol.
+
+    Args:
+        messages: Messages to stream
+        stream: Stream callback
+        ns: Namespace for the stream event
+
+    Behavior:
+    - Chunks messages appropriately
+    - Applies metadata for client consumption
+    - Handles AIMessage streaming specially
+    """
+
+@dataclass
+class MessageChunkMetadata:
+    """Metadata for message chunks in streaming.
+
+    Attributes:
+        run_id: Run identifier for tracing
+        message_id: Unique message identifier
+        is_final: Whether this is the final chunk
+        tool_call_id: Optional tool call identifier
+    """
+    run_id: str | None = None
+    message_id: str | None = None
+    is_final: bool = False
+    tool_call_id: str | None = None
+```
+
+**Streaming Flow**:
+
+```
+AI Response Generation          Message Streaming          Client
++-------------------+          +-----------------+        +--------+
+| AIMessage(        | -------> | Chunk 1: "Hel"  | -----> | Display|
+|   content="Hello" |          | Chunk 2: "lo"   |        | to     |
+|   tool_calls=[..] |          | Chunk 3: (tool) |        | User   |
+| )                 |          +-----------------+        +--------+
++-------------------+
+```
+
+**Message Types Handled**:
+
+| Message Type | Streaming Behavior |
+|--------------|-------------------|
+| `AIMessage` | Chunked content + tool calls |
+| `HumanMessage` | Passed through as-is |
+| `SystemMessage` | Passed through as-is |
+| `ToolMessage` | Passed through with metadata |
+| `AIMessageChunk` | Already chunked, forwarded |
+
+**Interactions**:
+- Used by `_loop.py` for message streaming
+- Integrates with LangChain message types
+- Consumed by frontend clients for real-time display
+
+---
+
