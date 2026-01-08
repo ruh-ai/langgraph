@@ -402,3 +402,193 @@ When `stream_mode="debug"` is used, these functions generate detailed execution 
 
 ---
 
+## 2. Configuration & Validation Files
+
+### 2.1 `_config.py`
+
+**Location**: `langgraph/pregel/_config.py`
+
+**Purpose**: Handles runtime configuration management for graph execution, including merging configurations, managing configurable parameters, and setting up execution context.
+
+**Key Functions**:
+
+```python
+def prepare_next_config(
+    config: RunnableConfig,
+    checkpoint_ns: str,
+    checkpoint_id: str | None,
+    *,
+    step: int = -1,
+    stream_mode: set[StreamMode] = None,
+    subgraph: bool = False,
+) -> RunnableConfig:
+    """Prepare configuration for the next execution step.
+
+    Responsibilities:
+    - Copies and patches the base configuration
+    - Sets up checkpoint namespace for subgraph isolation
+    - Configures stream modes for data output
+    - Manages step counter for execution tracking
+    """
+
+def patch_configurable(
+    config: RunnableConfig,
+    patch: dict[str, Any],
+) -> RunnableConfig:
+    """Patch the configurable section of a config.
+
+    Used to update specific configuration keys while
+    preserving the rest of the configuration structure.
+    """
+
+def patch_checkpoint_map(
+    config: RunnableConfig | None,
+    metadata: CheckpointMetadata | None,
+) -> RunnableConfig | None:
+    """Patch checkpoint_map into config from metadata.
+
+    Ensures checkpoint mapping is properly propagated
+    through configuration for state reconstruction.
+    """
+```
+
+**Configuration Keys Managed**:
+
+| Key | Description |
+|-----|-------------|
+| `CONFIG_KEY_CHECKPOINT_NS` | Namespace for checkpoint isolation |
+| `CONFIG_KEY_CHECKPOINT_ID` | Current checkpoint identifier |
+| `CONFIG_KEY_CHECKPOINTER` | Checkpointer instance reference |
+| `CONFIG_KEY_STREAM` | Stream callback for output |
+| `CONFIG_KEY_SEND` | Send callback for messages |
+| `CONFIG_KEY_READ` | Read callback for channel access |
+| `CONFIG_KEY_TASK_ID` | Current task identifier |
+| `CONFIG_KEY_RESUMING` | Flag indicating resume operation |
+| `CONFIG_KEY_CALL` | Task call implementation |
+
+**Interactions**:
+- Used by `main.py` to prepare execution configuration
+- Called by `_loop.py` to configure each execution step
+- Consumed by `_runner.py` for task execution context
+
+---
+
+### 2.2 `_validate.py`
+
+**Location**: `langgraph/pregel/_validate.py`
+
+**Purpose**: Validates graph structure and configuration before execution, ensuring all nodes, channels, and dependencies are properly defined.
+
+**Key Functions**:
+
+```python
+def validate_graph(
+    nodes: dict[str, PregelNode],
+    channels: dict[str, BaseChannel | ManagedValueSpec],
+    input_channels: str | Sequence[str],
+    output_channels: str | Sequence[str],
+    stream_channels: str | Sequence[str] | None,
+    interrupt_before_nodes: Sequence[str] | All,
+    interrupt_after_nodes: Sequence[str] | All,
+) -> None:
+    """Validate the complete graph structure.
+
+    Raises:
+        ValueError: If validation fails
+
+    Checks performed:
+    - All input channels exist
+    - All output channels exist
+    - All stream channels exist
+    - Interrupt nodes exist
+    - Node triggers reference valid channels
+    - No circular dependencies (optional)
+    """
+
+def validate_keys(
+    keys: str | Sequence[str],
+    channels: dict[str, BaseChannel | ManagedValueSpec],
+    which: str,
+) -> None:
+    """Validate that specified keys exist in channels.
+
+    Args:
+        keys: Single key or list of keys to validate
+        channels: Available channel definitions
+        which: Description for error messages
+    """
+
+def validate_nodes_and_triggers(
+    nodes: dict[str, PregelNode],
+    channels: dict[str, BaseChannel | ManagedValueSpec],
+) -> None:
+    """Validate node definitions and their channel triggers.
+
+    Ensures each node's triggers reference channels that:
+    - Exist in the channel definitions
+    - Are not managed values (which can't trigger)
+    """
+```
+
+**Key Class**:
+
+```python
+class PregelNode:
+    """Represents a validated node in the Pregel graph.
+
+    Attributes:
+        channels: Channels this node subscribes to
+        triggers: Channel names that trigger this node
+        mapper: Optional function to transform input
+        writers: Output writers for this node
+        bound: The actual runnable for this node
+        metadata: Additional node metadata
+        retry_policy: Retry configuration
+        defer: Whether to defer execution
+        subgraphs: List of subgraph Pregel instances
+    """
+
+    def validate(self) -> None:
+        """Validate node configuration."""
+```
+
+**Validation Flow**:
+
+```
+Pregel.__init__()
+    |
+    v
+validate_graph()
+    |
+    +-> validate_keys(input_channels)
+    |
+    +-> validate_keys(output_channels)
+    |
+    +-> validate_keys(stream_channels)
+    |
+    +-> validate_nodes_and_triggers()
+    |
+    +-> Check interrupt node existence
+    |
+    v
+Graph ready for execution
+```
+
+**Error Handling**:
+
+The validation functions raise descriptive `ValueError` exceptions:
+
+```python
+# Example validation errors:
+ValueError("Missing input channel: 'messages'")
+ValueError("Node 'agent' has trigger 'unknown' that doesn't exist")
+ValueError("Interrupt before node 'review' not found in graph")
+```
+
+**Interactions**:
+- Called by `main.py` during `Pregel.__init__()`
+- Ensures graph correctness before any execution
+- Prevents runtime errors from misconfiguration
+
+---
+
