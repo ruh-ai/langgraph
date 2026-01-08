@@ -2165,3 +2165,611 @@ logger.debug(f"Preparing {len(tasks)} tasks for step {step}")
 
 ---
 
+## 6. Visualization & Remote Files
+
+### 6.1 `_draw.py`
+
+**Location**: `langgraph/pregel/_draw.py`
+
+**Purpose**: Generates visual graph representations by simulating execution to discover edges and node relationships.
+
+**Key Data Structures**:
+
+```python
+class Edge(NamedTuple):
+    """Represents an edge in the graph visualization.
+
+    Attributes:
+        source: Source node name
+        target: Target node name
+        conditional: Whether edge is conditional
+        data: Optional edge label
+    """
+    source: str
+    target: str
+    conditional: bool
+    data: str | None
+
+class TriggerEdge(NamedTuple):
+    """Represents a trigger relationship.
+
+    Attributes:
+        source: Channel/node that triggers
+        conditional: Whether conditional
+        data: Optional label
+    """
+    source: str
+    conditional: bool
+    data: str | None
+```
+
+**Key Functions**:
+
+```python
+def draw_graph(
+    config: RunnableConfig,
+    *,
+    nodes: dict[str, PregelNode],
+    specs: dict[str, BaseChannel | ManagedValueSpec],
+    input_channels: str | Sequence[str],
+    interrupt_after_nodes: All | Sequence[str],
+    interrupt_before_nodes: All | Sequence[str],
+    trigger_to_nodes: Mapping[str, Sequence[str]],
+    checkpointer: Checkpointer,
+    subgraphs: dict[str, Graph],
+    limit: int = 250,
+) -> Graph:
+    """Generate a drawable graph representation.
+
+    Algorithm:
+    1. Initialize empty checkpoint and channels
+    2. Apply input writes to trigger first nodes
+    3. Simulate execution loop:
+       - Run task writers (with empty input)
+       - Collect static writes for edge discovery
+       - Apply writes and prepare next tasks
+       - Record edges between nodes
+    4. Add discovered edges to graph
+    5. Replace subgraph nodes with expanded subgraphs
+
+    Args:
+        config: Execution configuration
+        nodes: Graph node definitions
+        specs: Channel specifications
+        input_channels: Input channel names
+        interrupt_*_nodes: Interrupt configuration
+        trigger_to_nodes: Trigger mapping
+        checkpointer: Checkpointer for versioning
+        subgraphs: Nested subgraph representations
+        limit: Maximum simulation steps
+
+    Returns:
+        Graph object suitable for visualization
+    """
+
+def add_edge(
+    graph: Graph,
+    source: str,
+    target: str,
+    *,
+    data: Any | None = None,
+    conditional: bool = False,
+) -> None:
+    """Add an edge to the graph if not exists.
+
+    Avoids duplicate edges and auto-creates
+    END node if needed.
+    """
+```
+
+**Graph Discovery Process**:
+
+```
+             draw_graph()
+                  |
+                  v
+    +---------------------------+
+    | 1. Create empty state     |
+    |    (channels, checkpoint) |
+    +---------------------------+
+                  |
+                  v
+    +---------------------------+
+    | 2. Apply input writes     |
+    |    (trigger initial nodes)|
+    +---------------------------+
+                  |
+                  v
+    +---------------------------+
+    | 3. Simulation loop:       |
+    |    - Execute writers      |<----+
+    |    - Collect edges        |     |
+    |    - Apply writes         |     |
+    |    - Prepare next tasks   |-----+
+    +---------------------------+
+                  |
+                  v
+    +---------------------------+
+    | 4. Build Graph object     |
+    |    - Add nodes            |
+    |    - Add discovered edges |
+    |    - Expand subgraphs     |
+    +---------------------------+
+                  |
+                  v
+             Return Graph
+```
+
+**Edge Discovery**:
+
+The function discovers edges by:
+1. Running writers with static analysis mode
+2. Collecting `ChannelWrite.get_static_writes()` results
+3. Tracking which channels trigger which nodes
+4. Building edge relationships from writes → channels → nodes
+
+**Interactions**:
+- Called by `main.py` in `get_graph()` method
+- Uses `_algo.py` for task preparation simulation
+- Uses `_checkpoint.py` for empty state initialization
+- Returns `Graph` from LangChain Core
+
+---
+
+### 6.2 `remote.py`
+
+**Location**: `langgraph/pregel/remote.py`
+
+**Purpose**: Provides `RemoteGraph` class for interacting with LangGraph graphs deployed as remote APIs.
+
+**Key Classes**:
+
+```python
+class RemoteException(Exception):
+    """Exception raised when an error occurs in the remote graph."""
+    pass
+
+class RemoteGraph(PregelProtocol):
+    """Client for calling remote LangGraph APIs.
+
+    Implements PregelProtocol to behave like a local graph
+    while actually making HTTP requests to a remote server.
+    """
+
+    def __init__(
+        self,
+        assistant_id: str,
+        /,
+        *,
+        url: str | None = None,
+        api_key: str | None = None,
+        headers: dict[str, str] | None = None,
+        client: LangGraphClient | None = None,
+        sync_client: SyncLangGraphClient | None = None,
+        config: RunnableConfig | None = None,
+        name: str | None = None,
+        distributed_tracing: bool = False,
+    ):
+        """Initialize remote graph client.
+
+        Args:
+            assistant_id: Graph/assistant ID on the server
+            url: Base URL of the remote API
+            api_key: API key for authentication
+            headers: Additional HTTP headers
+            client: Pre-configured async client
+            sync_client: Pre-configured sync client
+            config: Default configuration
+            name: Human-readable name
+            distributed_tracing: Enable distributed tracing
+        """
+```
+
+**Key Methods**:
+
+```python
+# Graph introspection
+def get_graph(
+    self,
+    config: RunnableConfig | None = None,
+    *,
+    xray: int | bool = False,
+) -> DrawableGraph:
+    """Get graph representation from remote API.
+
+    Calls: GET /assistants/{assistant_id}/graph
+    """
+
+# State management
+def get_state(
+    self,
+    config: RunnableConfig,
+    *,
+    subgraphs: bool = False,
+) -> StateSnapshot:
+    """Get current state of a remote thread.
+
+    Calls: GET /threads/{thread_id}/state
+    or POST /threads/{thread_id}/state/checkpoint
+    """
+
+def update_state(
+    self,
+    config: RunnableConfig,
+    values: dict[str, Any] | Any | None,
+    as_node: str | None = None,
+) -> RunnableConfig:
+    """Update state of a remote thread.
+
+    Calls: POST /threads/{thread_id}/state
+    """
+
+def get_state_history(
+    self,
+    config: RunnableConfig,
+    *,
+    filter: dict[str, Any] | None = None,
+    before: RunnableConfig | None = None,
+    limit: int | None = None,
+) -> Iterator[StateSnapshot]:
+    """Get state history of a remote thread.
+
+    Calls: POST /threads/{thread_id}/history
+    """
+
+# Execution
+def invoke(
+    self,
+    input: dict[str, Any] | Any,
+    config: RunnableConfig | None = None,
+    *,
+    interrupt_before: All | Sequence[str] | None = None,
+    interrupt_after: All | Sequence[str] | None = None,
+) -> dict[str, Any] | Any:
+    """Execute graph and return final result."""
+
+def stream(
+    self,
+    input: dict[str, Any] | Any,
+    config: RunnableConfig | None = None,
+    *,
+    stream_mode: StreamMode | list[StreamMode] | None = None,
+    interrupt_before: All | Sequence[str] | None = None,
+    interrupt_after: All | Sequence[str] | None = None,
+    subgraphs: bool = False,
+) -> Iterator[dict[str, Any] | Any]:
+    """Stream execution results from remote graph.
+
+    Calls: POST /threads/{thread_id}/runs/stream
+    or POST /runs/stream
+    """
+```
+
+**Remote Execution Flow**:
+
+```
+                Client (RemoteGraph)
+                        |
+                        v
+            +------------------------+
+            | Sanitize configuration |
+            | - Remove non-serializable|
+            | - Prepare thread_id    |
+            +------------------------+
+                        |
+                        v
+            +------------------------+
+            |    HTTP Request        |
+            | POST /runs/stream      |
+            +------------------------+
+                        |
+                        v
+                 [Remote Server]
+                        |
+                        v
+            +------------------------+
+            |  SSE Event Stream      |
+            | - mode: updates/values |
+            | - data: {...}          |
+            +------------------------+
+                        |
+                        v
+            +------------------------+
+            | Process stream chunks  |
+            | - Handle interrupts    |
+            | - Raise exceptions     |
+            | - Yield to caller      |
+            +------------------------+
+```
+
+**Stream Mode Handling**:
+
+```python
+def _get_stream_modes(
+    self,
+    stream_mode: StreamMode | list[StreamMode] | None,
+    config: RunnableConfig | None,
+    default: StreamMode = "updates",
+) -> tuple[list[StreamModeSDK], list[StreamModeSDK], bool, StreamProtocol | None]:
+    """Prepare stream modes for remote request.
+
+    Process:
+    1. Coerce to list or use default
+    2. Add modes from parent graph (if subgraph)
+    3. Map 'messages' to 'messages-tuple'
+    4. Ensure 'updates' is included (for interrupt detection)
+    5. Remove unsupported modes ('events')
+
+    Returns:
+        (final_modes, requested_modes, single_mode, parent_stream)
+    """
+```
+
+**Interrupt and Error Handling**:
+
+```python
+# In stream():
+for chunk in sync_client.runs.stream(...):
+    # Handle commands to parent
+    if mode == "command" and chunk.data.get("graph") == Command.PARENT:
+        raise ParentCommand(Command(**chunk.data))
+
+    # Handle interrupts
+    if chunk.event.startswith("updates"):
+        if isinstance(chunk.data, dict) and INTERRUPT in chunk.data:
+            if caller_ns:
+                raise GraphInterrupt([Interrupt(**i) for i in chunk.data[INTERRUPT]])
+
+    # Handle errors
+    elif chunk.event.startswith("error"):
+        raise RemoteException(chunk.data)
+```
+
+**Interactions**:
+- Implements `PregelProtocol` from `protocol.py`
+- Uses `langgraph_sdk` for HTTP communication
+- Can be used as a subgraph in local Pregel graphs
+- Integrates with LangSmith for distributed tracing
+
+---
+
+## File Interaction Diagram
+
+The following diagram shows how all 22 files in the Pregel library interact:
+
+```
+                            ┌─────────────────┐
+                            │   __init__.py   │
+                            │  (Public API)   │
+                            └────────┬────────┘
+                                     │
+                  ┌──────────────────┼──────────────────┐
+                  │                  │                  │
+                  ▼                  ▼                  ▼
+         ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+         │  main.py    │    │ protocol.py │    │  types.py   │
+         │  (Pregel)   │◄───│(PregelProto)│    │ (Types)     │
+         └──────┬──────┘    └─────────────┘    └─────────────┘
+                │                  ▲
+                │                  │
+    ┌───────────┼───────────┬──────┴──────┐
+    │           │           │             │
+    ▼           ▼           ▼             ▼
+┌─────────┐ ┌─────────┐ ┌─────────┐ ┌───────────┐
+│_validate│ │ _config │ │ _draw.py│ │ remote.py │
+│  .py    │ │  .py    │ │ (Visual)│ │(RemoteGr) │
+└─────────┘ └─────────┘ └────┬────┘ └───────────┘
+                             │
+                             ▼
+                      ┌─────────────┐
+                      │  _loop.py   │
+                      │ (Exec Loop) │
+                      └──────┬──────┘
+                             │
+         ┌───────────────────┼───────────────────┐
+         │                   │                   │
+         ▼                   ▼                   ▼
+    ┌─────────┐        ┌─────────┐        ┌─────────┐
+    │ _algo.py│        │_runner. │        │_executor│
+    │ (Core   │◄──────▶│  py     │◄──────▶│  .py    │
+    │ Algo)   │        │ (Tasks) │        │ (Exec)  │
+    └────┬────┘        └────┬────┘        └─────────┘
+         │                  │
+         │                  ▼
+         │            ┌─────────┐
+         │            │_retry.py│
+         │            │ (Retry) │
+         │            └─────────┘
+         │
+         ├──────────────────┬──────────────────┐
+         │                  │                  │
+         ▼                  ▼                  ▼
+    ┌─────────┐        ┌─────────┐        ┌─────────┐
+    │ _io.py  │        │_read.py │        │_write.py│
+    │ (I/O)   │◄──────▶│ (Read)  │◄──────▶│ (Write) │
+    └─────────┘        └─────────┘        └─────────┘
+                                               │
+                                               ▼
+                                          ┌─────────┐
+                                          │_messages│
+                                          │  .py    │
+                                          └─────────┘
+
+    ┌─────────────────────────────────────────────────────┐
+    │                  Support Layer                       │
+    ├─────────────┬─────────────┬────────────┬────────────┤
+    │ _checkpoint │   _call.py  │  _utils.py │  _log.py   │
+    │    .py      │   (Calls)   │  (Utils)   │  (Logger)  │
+    └─────────────┴─────────────┴────────────┴────────────┘
+
+    ┌─────────────────────────────────────────────────────┐
+    │                   debug.py                          │
+    │             (Debugging Utilities)                   │
+    └─────────────────────────────────────────────────────┘
+```
+
+### File Dependency Summary
+
+| File | Imports From |
+|------|--------------|
+| `__init__.py` | main, protocol, types |
+| `main.py` | All internal modules |
+| `protocol.py` | types |
+| `types.py` | (external only) |
+| `debug.py` | types, _io |
+| `_config.py` | (internal constants) |
+| `_validate.py` | _read, types |
+| `_io.py` | types |
+| `_read.py` | _write, types |
+| `_write.py` | types |
+| `_messages.py` | protocol |
+| `_algo.py` | _io, _read, types, _checkpoint |
+| `_loop.py` | _algo, _runner, _checkpoint, _io |
+| `_runner.py` | _retry, types |
+| `_executor.py` | (external only) |
+| `_call.py` | _write, types |
+| `_checkpoint.py` | (external only) |
+| `_retry.py` | types, _log |
+| `_utils.py` | _read, protocol |
+| `_log.py` | (external only) |
+| `_draw.py` | _algo, _io, _read, _write, _checkpoint |
+| `remote.py` | protocol, types |
+
+---
+
+## Execution Flow
+
+### Complete Execution Lifecycle
+
+```
+User Call                                         Return Value
+    │                                                  ▲
+    ▼                                                  │
+┌───────────────────────────────────────────────────────┐
+│                    main.py: Pregel                    │
+├───────────────────────────────────────────────────────┤
+│  1. Validate inputs (via _validate.py)                │
+│  2. Merge configuration (via _config.py)              │
+│  3. Load checkpoint if exists (via checkpointer)      │
+│  4. Initialize channels (_checkpoint.channels_from_)  │
+└───────────────────────────────────────────────────────┘
+                         │
+                         ▼
+┌───────────────────────────────────────────────────────┐
+│                _loop.py: PregelLoop                   │
+├───────────────────────────────────────────────────────┤
+│  Loop until no more tasks or interrupt:               │
+│  ┌─────────────────────────────────────────────────┐  │
+│  │ STEP N:                                         │  │
+│  │  a. Check interrupt_before (via _algo.py)       │  │
+│  │  b. Execute tasks (via _runner.py)              │  │
+│  │  c. Apply writes (via _algo.py)                 │  │
+│  │  d. Check interrupt_after (via _algo.py)        │  │
+│  │  e. Create checkpoint (via _checkpoint.py)      │  │
+│  │  f. Stream outputs (via _io.py)                 │  │
+│  │  g. Prepare next tasks (via _algo.py)           │  │
+│  └─────────────────────────────────────────────────┘  │
+└───────────────────────────────────────────────────────┘
+                         │
+                         ▼
+┌───────────────────────────────────────────────────────┐
+│              _runner.py: Task Execution               │
+├───────────────────────────────────────────────────────┤
+│  For each task (potentially parallel):                │
+│  ┌─────────────────────────────────────────────────┐  │
+│  │  1. Prepare task config                         │  │
+│  │  2. Read channels (_read.py)                    │  │
+│  │  3. Execute node runnable                       │  │
+│  │  4. Run writers (_write.py)                     │  │
+│  │  5. Handle retries if needed (_retry.py)        │  │
+│  └─────────────────────────────────────────────────┘  │
+└───────────────────────────────────────────────────────┘
+                         │
+                         ▼
+┌───────────────────────────────────────────────────────┐
+│            _algo.py: Write Application                │
+├───────────────────────────────────────────────────────┤
+│  1. Collect writes from all tasks                     │
+│  2. Group by channel                                  │
+│  3. Apply to channels (update values)                 │
+│  4. Update channel versions                           │
+│  5. Return set of updated channels                    │
+└───────────────────────────────────────────────────────┘
+                         │
+                         ▼
+┌───────────────────────────────────────────────────────┐
+│          _checkpoint.py: State Persistence            │
+├───────────────────────────────────────────────────────┤
+│  1. Serialize channel values                          │
+│  2. Create new checkpoint with updated versions       │
+│  3. Store via checkpointer implementation             │
+│  4. Return new checkpoint ID                          │
+└───────────────────────────────────────────────────────┘
+```
+
+### Stream Mode Data Flow
+
+```
+                    stream() called
+                          │
+                          ▼
+            ┌─────────────────────────────┐
+            │ Determine stream modes:     │
+            │ - "values": full state      │
+            │ - "updates": incremental    │
+            │ - "debug": execution trace  │
+            │ - "messages": AI messages   │
+            │ - "custom": user-defined    │
+            └─────────────────────────────┘
+                          │
+              ┌───────────┴───────────┐
+              │                       │
+              ▼                       ▼
+    ┌─────────────────┐     ┌─────────────────┐
+    │ "values" mode   │     │ "updates" mode  │
+    │                 │     │                 │
+    │ After each step:│     │ After each step:│
+    │ yield full      │     │ yield node      │
+    │ channel values  │     │ outputs only    │
+    └─────────────────┘     └─────────────────┘
+              │                       │
+              └───────────┬───────────┘
+                          │
+                          ▼
+            ┌─────────────────────────────┐
+            │    Stream to callback       │
+            │    or yield to iterator     │
+            └─────────────────────────────┘
+```
+
+---
+
+## Summary
+
+The Pregel library is a sophisticated graph execution engine with these key characteristics:
+
+1. **Modular Architecture**: 22 files organized into logical layers (core, I/O, execution, support)
+
+2. **Graph-Based Model**: Nodes connected via channels with trigger-based execution
+
+3. **Checkpointing**: Full state persistence for fault tolerance and debugging
+
+4. **Flexible Execution**: Support for sync/async, streaming, and parallel execution
+
+5. **Extensibility**: Protocol-based design allows local and remote implementations
+
+6. **Robustness**: Built-in retry logic, interrupt handling, and error management
+
+### Quick Reference
+
+| Need | File |
+|------|------|
+| Create a graph | `main.py` (Pregel class) |
+| Define node behavior | `_read.py` (PregelNode) |
+| Write to channels | `_write.py` (ChannelWrite) |
+| Understand execution | `_loop.py`, `_algo.py` |
+| Add retry logic | `_retry.py` |
+| Visualize graph | `_draw.py` |
+| Remote execution | `remote.py` |
+| Debug execution | `debug.py` |
+
